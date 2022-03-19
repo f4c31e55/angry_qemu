@@ -10,6 +10,9 @@ logging.getLogger('pwnlib.tubes.process').setLevel(logging.WARNING)
 from .t import TB
 
 class QEMU_Proxy:
+    cpu_state = 'CPUArchState'
+    pc_offset = (0x80,4)
+
     def __init__(self, cmd):
         self.log = logging.getLogger('angry_qemu')
         self.mem = io.BytesIO()
@@ -69,16 +72,21 @@ class QEMU_Proxy:
         r = self._exec(f"p cpu->env_ptr")
         self.initial_ctx_addr = int(findall(' (0x[0-9a-f]+)',r)[0],16)
 
-        r = self._exec(f"p sizeof(CPUArchState)") #TODO: make this more efficient
+        r = self._exec(f"p sizeof({self.cpu_state})") #TODO: make this more efficient
         env_size = int(findall(' = ([0-9]+)',r)[0])
         self.initial_ctx = self.target.rm(self.initial_ctx_addr, 1, env_size, raw=True)
 
-        try: #oof
-            r = self._exec(f"p tcg_ctxs->code_gen_prologue")
+        try: #oof - TODO: qemu version mixin
+            r = self._exec("p tcg_ctx->code_gen_prologue")
         except Exception:
-            r = self._exec(f"p tcg_ctxs->code_buf")
+            try:
+                r = self._exec(f"p tcg_ctxs->code_gen_prologue")
+            except Exception:
+                r = self._exec(f"p tcg_ctxs->code_buf")
+
         self.base = int(findall(' (0x[0-9a-f]+)',r)[0],16)
         
+        # TODO: qemu version mixin
         if 'struct tb_tc' in self._exec(f"ptype TranslationBlock"):
             self.tb_find = self.tb_find2
         else:
@@ -88,15 +96,11 @@ class QEMU_Proxy:
     def lift(self, guest_pc, thumb=None):
         if self.log.isEnabledFor(logging.DEBUG): self.log.debug(f"new guest_pc 0x{guest_pc:x}")
         
-        #FIXME: offsetof
-        # anything but hexagon
-        self.target.wm(self.initial_ctx_addr+0x80, 4, guest_pc)
-        # hexagon
-        self.target.wm(self.initial_ctx_addr+0xa4, 4, guest_pc)
-        # thumb
-        if thumb is not None: self.target.wm(self.initial_ctx_addr+0x408, 4, thumb)
+        self.target.wm(self.initial_ctx_addr+self.pc_offset[0], self.pc_offset[1], guest_pc)
+        if thumb is not None: self.target.wm(self.initial_ctx_addr+0x218, 4, thumb)
 
         p,s = self.tb_find()
+        if self.log.isEnabledFor(logging.DEBUG): self.log.debug(f"host_pc 0x{p:x}")
 
         m = self.target.rm(p,1,s,raw=True)
         self.h2g[p] = guest_pc
@@ -113,3 +117,9 @@ class QEMU_Proxy:
         p,s = findall('ptr = (0x[0-9a-f]+).*size = (0x[0-9a-f]+)',r)[0]
         return int(p,16),int(s,16)
 
+class ARM_QEMU_Proxy(QEMU_Proxy):
+    cpu_state = 'CPUARMState'
+    pc_offset = (0x3c,4)
+
+class Hexagon_QEMU_Proxy(QEMU_Proxy):
+    pc_offset = (0xa4,4)
